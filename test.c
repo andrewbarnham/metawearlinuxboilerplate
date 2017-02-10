@@ -8,13 +8,21 @@
 #include "gattlib.h"
 #include "metawear/core/metawearboard.h"
 #include "metawear/peripheral/led.h"
+#include "metawear/core/datasignal.h"
+#include "metawear/core/settings.h"
+#include "metawear/sensor/switch.h"
+#include "metawear/processor/rss.h"
+#include "metawear/sensor/accelerometer.h"
+#include "metawear/core/types.h"
+#include "metawear/sensor/gyro_bmi160.h"
 
 static MblMwMetaWearBoard* board;
 static gatt_connection_t* gatt_connection;
 static gattlib_characteristic_t* characteristics;
 static int services_count, characteristics_count;
 static	MblMwLedPattern pattern;
-//static bt_uuid_t *notify;
+
+static bt_uuid_t battery = { };
 
 typedef struct notify_buffer {
 	uint8_t* data;
@@ -210,6 +218,61 @@ static void  init(MblMwMetaWearBoard* board, int32_t status) {
 	    }
 }
 
+static void switch_handler(const MblMwData* data) 
+{
+     if (*((uint32_t*)data->value)) {
+	   printf ("Switch Pressed\n");
+    } else {
+	   printf ("Switch Released\n");
+    }
+}
+
+static int accel_count;
+static time_t last_accel;
+
+static void accel_handler(const MblMwData* data) 
+{
+	MblMwCartesianFloat *acceleration = (MblMwCartesianFloat*) data->value;
+
+	time_t n = time(NULL);
+	if (n!=last_accel) {
+		printf("ACCL S/R: %i %f %f %f\n",accel_count,acceleration->x, acceleration->y, acceleration->z);
+		last_accel=n;
+		accel_count=0;
+	}
+	accel_count++;
+
+        //
+        //printf("(%.3fg, %.3fg, %.3fg)\n", );
+}
+
+static int gyro_count;
+static time_t last_gyro;
+
+
+static void gyro_handler(const MblMwData* data) 
+{
+        MblMwCartesianFloat *acceleration = (MblMwCartesianFloat*) data->value;
+
+	time_t n = time(NULL);
+	if (n!=last_gyro) {
+		printf("GYRO S/R: %i %f %f %f\n",gyro_count,acceleration->x, acceleration->y, acceleration->z);
+		last_gyro=n;
+		gyro_count=0;
+	}
+	gyro_count++;
+	
+
+//        printf("(%.3fdps, %.3fdps, %.3fdps)\n", acceleration->x, acceleration->y, acceleration->z);
+}
+
+static void battery_handler(const MblMwData* data)
+{
+	MblMwBatteryState *state = (MblMwBatteryState*) data->value;
+        printf("{voltage: %dmV, charge: %d}\n", state->voltage, state->charge);
+
+}
+
 int main(int argc, char *argv[]) {
 	int dev_id;
 	dev_id = hci_get_route(NULL);
@@ -229,7 +292,7 @@ int main(int argc, char *argv[]) {
 		return 0;
 	}
         puts("Succeeded to connect to the bluetooth device with random address.");
-
+	
 
         ret = gattlib_discover_primary(gatt_connection, &services, &services_count);
         if (ret != 0) {
@@ -267,12 +330,22 @@ int main(int argc, char *argv[]) {
 	char myArray[] = { 0x01, 0x00 };
 	gattlib_write_char_by_handle(gatt_connection,(uint16_t)0x20, myArray,2);
 
+	uint8_t buffer[100];
+	bt_uuid_t batt;
+	bt_string_to_uuid(&batt,"00002a19-0000-1000-8000-00805f9b34fb");
+	int len=gattlib_read_char_by_uuid(gatt_connection,&batt,buffer,sizeof(buffer));
+	printf("BATTERY :%i\n",buffer[0]);
+
+
+
+
 	MblMwBtleConnection btle_conn = { write_gatt_char, read_gatt_char };
 	board = mbl_mw_metawearboard_create(&btle_conn);
 	printf("Initializing:");
 	fflush(stdout);
 	mbl_mw_metawearboard_initialize(board,&init);
 	waitStatus(2);
+	sleep(1);
 	if (mbl_mw_metawearboard_is_initialized(board)) {
 	        printf("LED %i\n",mbl_mw_metawearboard_lookup_module(board,MBL_MW_MODULE_LED));
 		
@@ -280,16 +353,38 @@ int main(int argc, char *argv[]) {
 		mbl_mw_led_write_pattern(board, &pattern, MBL_MW_LED_COLOR_BLUE);
 		mbl_mw_led_play(board);
 
-		sleep(2);
+		MblMwDataSignal *switch_signal = mbl_mw_switch_get_state_data_signal(board);
+		mbl_mw_datasignal_subscribe(switch_signal, &switch_handler);	
+
+		//MblMwDataSignal *battery_signal = mbl_mw_settings_get_battery_state_data_signal(board);
+    		//mbl_mw_datasignal_subscribe(battery_signal,&battery_handler);
+       	        //mbl_mw_datasignal_read(battery_signal);	
+
+		MblMwDataSignal *acc_signal = mbl_mw_acc_get_acceleration_data_signal(board);
+		mbl_mw_datasignal_subscribe(acc_signal, &accel_handler);	
+		mbl_mw_acc_set_odr(board, 200.f);	
+  		mbl_mw_acc_enable_acceleration_sampling(board);
+ 	   	mbl_mw_acc_start(board);
+
+		MblMwDataSignal *gyro_signal = mbl_mw_gyro_bmi160_get_rotation_data_signal(board);
+		mbl_mw_datasignal_subscribe(gyro_signal,&gyro_handler);
+		mbl_mw_gyro_bmi160_set_odr(board, 200.f);
+		mbl_mw_gyro_bmi160_enable_rotation_sampling(board);
+		mbl_mw_gyro_bmi160_start(board);
+
+
+		sleep(30);
+
+		mbl_mw_datasignal_unsubscribe(switch_signal);
 
 		mbl_mw_led_stop(board);
 	}
 
 
+	mbl_mw_metawearboard_free(board);
         free(services);
         free(characteristics);
         gattlib_disconnect(gatt_connection);
-	mbl_mw_metawearboard_free(board);
         printf("------------FINISH %s ---------------\n", addr);
 }
 	
